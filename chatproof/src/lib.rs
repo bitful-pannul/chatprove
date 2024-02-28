@@ -4,7 +4,7 @@ use kinode_process_lib::{await_message, call_init, println, Address, Message};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use sha2::Sha256;
-use sp1_core::{utils::BabyBearBlake3, SP1ProofWithIO, SP1Prover, SP1Stdin, SP1Verifier};
+use sp1_core::{SP1Prover, SP1Stdin};
 use std::collections::HashMap;
 
 use frankenstein::UpdateContent::Message as TgMessage;
@@ -26,6 +26,16 @@ pub struct ChatMessage {
     pub sender: String,
     pub text: String,
     pub timestamp: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+enum ProofResult {
+    NotFound,
+    Found {
+        checkpoint_timestamp: u64,
+        sender: String,
+        text: String,
+    },
 }
 
 type Checkpoints = HashMap<u64, (Vec<u8>, Vec<ChatMessage>)>;
@@ -78,17 +88,14 @@ fn handle_message(
                                 let mut stdin = SP1Stdin::new();
                                 println!("created spi");
                                 stdin.write(checkpoints);
-                                println!("wrote checkpoints");
+                                println!("wrote checkpoints: {:?}", checkpoints);
                                 stdin.write(&text);
-                                println!("wrote text");
+                                println!("wrote text: {}", text);
                                 let mut res = SP1Prover::prove(CHAT_ELF, stdin)
                                     .map_err(|e| anyhow::anyhow!(e))?;
                                 println!("proven???");
-                                let output = res.stdout.read::<bool>();
-                                println!("output: {:?}", output);
-
-                                let output_text = serde_json::json!(output).to_string();
-                                let output_text = format!("got some proof! {}", output_text);
+                                let output = res.stdout.read::<ProofResult>();
+                                let output_text = format!("got some proof! {:?}", output);
 
                                 let params = SendMessageParams {
                                     chat_id: ChatId::Integer(msg.chat.id),
@@ -103,6 +110,7 @@ fn handle_message(
                                     reply_parameters: None,
                                 };
                                 api.send_message(&params)?;
+                                return Ok(None);
                             }
 
                             let chat_message = ChatMessage {
@@ -166,6 +174,7 @@ fn init(our: Address) {
             &checkpoints,
         ) {
             Ok(Some((timestamp, hash))) => {
+                println!("checkpoint: {:?}", (timestamp, &history));
                 checkpoints.insert(timestamp, (hash, history));
                 history = Vec::new();
             }
