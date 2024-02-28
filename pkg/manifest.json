@@ -3,12 +3,16 @@
         "process_name": "chatproof",
         "process_wasm_path": "/chatproof.wasm",
         "on_exit": "Restart",
-        "request_networking": true,
+        "request_networking": false,
         "request_capabilities": [
             "http_client:distro:sys",
             "vfs:distro:sys"
         ],
-        "grant_capabilities": [],
-        "public": true
+        "grant_capabilities": [
+            "http_client:distro:sys",
+            "terminal:terminal:sys",
+            "vfs:distro:sys"
+        ],
+        "public": false
     }
 ]

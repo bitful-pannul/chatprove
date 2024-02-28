@@ -47,7 +47,7 @@ pub fn init_tg_bot(
         &tg_bot_wasm_path,
         OnExit::None,
         our_caps,
-        vec![http_client],
+        vec![http_client, our.process.clone()],
         false,
     )?;
 

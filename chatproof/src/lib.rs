@@ -1,4 +1,5 @@
 use frankenstein::TelegramApi;
+use frankenstein::UpdateContent::Message as TgMessage;
 use frankenstein::{ChatId, SendMessageParams};
 use kinode_process_lib::{await_message, call_init, println, Address, Message};
 use serde::{Deserialize, Serialize};
@@ -7,7 +8,6 @@ use sha2::Sha256;
 use sp1_core::{SP1Prover, SP1Stdin};
 use std::collections::HashMap;
 
-use frankenstein::UpdateContent::Message as TgMessage;
 mod tg_api;
 use tg_api::{init_tg_bot, Api, TgResponse};
 
@@ -28,153 +28,125 @@ pub struct ChatMessage {
     pub timestamp: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-enum ProofResult {
-    NotFound,
-    Found {
-        checkpoint_timestamp: u64,
-        sender: String,
-        text: String,
-    },
-}
+/// list of results: checkpoint_timestamp, sender, text
+type ProofResult = Vec<(u64, String, String)>;
 
 type Checkpoints = HashMap<u64, (Vec<u8>, Vec<ChatMessage>)>;
 
 fn handle_message(
     api: &Api,
-    worker: &Address,
     history: &mut Vec<ChatMessage>,
     last_checkpoint: &mut u64,
     checkpoints: &Checkpoints,
 ) -> anyhow::Result<Option<(u64, Vec<u8>)>> {
-    let message = await_message()?;
+    match await_message()? {
+        Message::Response { .. } => Ok(None),
+        Message::Request { ref body, .. } => {
+            let Ok(TgResponse::Update(tg_update)) = serde_json::from_slice(body) else {
+                return Ok(None);
+            };
+            let Some(update) = tg_update.updates.last() else {
+                return Ok(None);
+            };
+            let TgMessage(msg) = &update.content else {
+                return Ok(None);
+            };
+            let Some(ref msg_text) = msg.text else {
+                return Ok(None);
+            };
+            // if /prove command then prove that search string was within the chat history
+            if msg_text.starts_with("/prove ") {
+                let search_string = msg.text.as_ref().map(|s| s[7..].to_string()).unwrap();
 
-    match message {
-        Message::Response { .. } => {
-            return Err(anyhow::anyhow!("unexpected Response: {:?}", message));
-        }
-        Message::Request {
-            ref source,
-            ref body,
-            ..
-        } => match serde_json::from_slice(body) {
-            Ok(TgResponse::Update(tg_update)) => {
-                let updates = tg_update.updates;
-                // assert update is from our worker
-                if source != worker {
-                    return Err(anyhow::anyhow!(
-                        "unexpected source: {:?}, expected: {:?}",
-                        source,
-                        worker
-                    ));
-                }
+                let mut stdin = SP1Stdin::new();
+                stdin.write(checkpoints);
+                stdin.write(&search_string);
+                println!("chatproof: searching chat for string \"{}\"", search_string);
+                let mut res = SP1Prover::prove(CHAT_ELF, stdin).map_err(|e| anyhow::anyhow!(e))?;
+                println!("proof complete");
+                let output = res.stdout.read::<ProofResult>();
 
-                if let Some(update) = updates.last() {
-                    match &update.content {
-                        TgMessage(msg) => {
-                            // if /prove command then prove that search string was within the chat history
-                            if msg
-                                .text
-                                .as_ref()
-                                .map(|s| s.starts_with("/prove"))
-                                .unwrap_or(false)
-                            {
-                                let search_string = msg.text.as_ref().map(|s| {
-                                    s.split_whitespace().skip(1).collect::<Vec<&str>>().join("")
-                                });
+                // turn results vector into chat message
+                let output_text = output
+                    .iter()
+                    .map(|(timestamp, sender, text)| {
+                        format!(
+                            "{} {}: {}",
+                            chrono::DateTime::<chrono::Utc>::from(
+                                std::time::UNIX_EPOCH + std::time::Duration::from_secs(*timestamp)
+                            )
+                            .format("%Y-%m-%d %H:%M")
+                            .to_string(),
+                            sender,
+                            text
+                        )
+                    })
+                    .collect::<Vec<String>>()
+                    .join("\n");
 
-                                let text = search_string.unwrap_or_else(|| "".to_string());
-
-                                let mut stdin = SP1Stdin::new();
-                                println!("created spi");
-                                stdin.write(checkpoints);
-                                println!("wrote checkpoints: {:?}", checkpoints);
-                                stdin.write(&text);
-                                println!("wrote text: {}", text);
-                                let mut res = SP1Prover::prove(CHAT_ELF, stdin)
-                                    .map_err(|e| anyhow::anyhow!(e))?;
-                                println!("proven???");
-                                let output = res.stdout.read::<ProofResult>();
-                                let output_text = format!("got some proof! {:?}", output);
-
-                                let params = SendMessageParams {
-                                    chat_id: ChatId::Integer(msg.chat.id),
-                                    text: output_text,
-                                    parse_mode: None,
-                                    disable_notification: None,
-                                    reply_markup: None,
-                                    entities: None,
-                                    link_preview_options: None,
-                                    message_thread_id: None,
-                                    protect_content: None,
-                                    reply_parameters: None,
-                                };
-                                api.send_message(&params)?;
-                                return Ok(None);
-                            }
-
-                            let chat_message = ChatMessage {
-                                sender: msg
-                                    .from
-                                    .as_ref()
-                                    .and_then(|user| user.username.clone())
-                                    .unwrap_or_else(|| "".to_string()),
-                                text: msg.text.clone().unwrap_or_else(|| "".to_string()),
-                                timestamp: msg.date,
-                            };
-                            let timestamp = chat_message.timestamp;
-
-                            history.push(chat_message);
-
-                            if timestamp - 5 > *last_checkpoint {
-                                let mut hasher = Sha256::new();
-                                hasher.update(serde_json::to_vec(&history)?);
-
-                                let hash: Vec<u8> = hasher.finalize().to_vec();
-
-                                *last_checkpoint = timestamp;
-                                return Ok(Some((*last_checkpoint, hash)));
-                            }
-                        }
-                        _ => {}
-                    }
-                }
+                api.send_message(&SendMessageParams {
+                    chat_id: ChatId::Integer(msg.chat.id),
+                    text: output_text,
+                    parse_mode: None,
+                    disable_notification: None,
+                    reply_markup: None,
+                    entities: None,
+                    link_preview_options: None,
+                    message_thread_id: None,
+                    protect_content: None,
+                    reply_parameters: None,
+                })?;
+                // don't save bot commands to chat history
+                return Ok(None);
             }
-            _ => {}
-        },
+
+            history.push(ChatMessage {
+                sender: msg
+                    .from
+                    .as_ref()
+                    .and_then(|user| user.username.clone())
+                    .unwrap_or_else(|| "".to_string()),
+                text: msg.text.clone().unwrap_or_else(|| "".to_string()),
+                timestamp: msg.date,
+            });
+
+            if msg.date - 5 > *last_checkpoint {
+                let mut hasher = Sha256::new();
+                hasher.update(serde_json::to_vec(&history)?);
+
+                let hash: Vec<u8> = hasher.finalize().to_vec();
+
+                *last_checkpoint = msg.date;
+                return Ok(Some((*last_checkpoint, hash)));
+            } else {
+                return Ok(None);
+            }
+        }
     }
-    Ok(None)
 }
 
 call_init!(init);
-
 fn init(our: Address) {
     println!("chatproof: begin");
 
+    // first message must initialize our bot-worker
     let message = await_message().unwrap();
-    let token_str = String::from_utf8(message.body().to_vec()).unwrap_or_else(|_| "".to_string());
-
-    let (api, worker) = init_tg_bot(our.clone(), &token_str, None).unwrap();
+    let token_str = String::from_utf8(message.body().to_vec()).unwrap();
+    let (api, _worker) = init_tg_bot(our.clone(), &token_str, None).unwrap();
 
     let mut history: Vec<ChatMessage> = Vec::new();
 
     let mut last_checkpoint: u64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .expect("Time went backwards")
+        .unwrap()
         .as_secs();
 
+    // TODO: hash this data structure and commit to it somewhere for data availability
     let mut checkpoints: Checkpoints = HashMap::new();
 
     loop {
-        match handle_message(
-            &api,
-            &worker,
-            &mut history,
-            &mut last_checkpoint,
-            &checkpoints,
-        ) {
+        match handle_message(&api, &mut history, &mut last_checkpoint, &checkpoints) {
             Ok(Some((timestamp, hash))) => {
-                println!("checkpoint: {:?}", (timestamp, &history));
                 checkpoints.insert(timestamp, (hash, history));
                 history = Vec::new();
             }
@@ -185,20 +157,3 @@ fn init(our: Address) {
         };
     }
 }
-
-// p1 - p2 dm
-// m1 m2 m3 m4 -> Hash() -> post
-//    m2          Hash() -> zk -> real.
-
-// m1 m2
-//   c1   <- hash
-//   c2   <- hash
-//   c3   <- hash
-//   c4   <- hash
-
-// prover <-
-// takes chatlog <- hash1 assert(1) <- assert(2) <- assert(3)
-//   proof = true // proof == message
-
-// merkle tree hashing btfo
-// vs zk proof
