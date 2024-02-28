@@ -66,36 +66,52 @@ fn handle_message(
                 println!("proof complete");
                 let output = res.stdout.read::<ProofResult>();
 
-                // turn results vector into chat message
-                let output_text = output
-                    .iter()
-                    .map(|(timestamp, sender, text)| {
-                        format!(
-                            "{} {}: {}",
-                            chrono::DateTime::<chrono::Utc>::from(
-                                std::time::UNIX_EPOCH + std::time::Duration::from_secs(*timestamp)
+                if output.is_empty() {
+                    api.send_message(&SendMessageParams {
+                        chat_id: ChatId::Integer(msg.chat.id),
+                        text: "No results found".to_string(),
+                        parse_mode: None,
+                        disable_notification: None,
+                        reply_markup: None,
+                        entities: None,
+                        link_preview_options: None,
+                        message_thread_id: None,
+                        protect_content: None,
+                        reply_parameters: None,
+                    })?;
+                } else {
+                    // turn results vector into chat message
+                    let output_text = output
+                        .iter()
+                        .map(|(timestamp, sender, text)| {
+                            format!(
+                                "{} {}: {}",
+                                chrono::DateTime::<chrono::Utc>::from(
+                                    std::time::UNIX_EPOCH
+                                        + std::time::Duration::from_secs(*timestamp)
+                                )
+                                .format("%Y-%m-%d %H:%M")
+                                .to_string(),
+                                sender,
+                                text
                             )
-                            .format("%Y-%m-%d %H:%M")
-                            .to_string(),
-                            sender,
-                            text
-                        )
-                    })
-                    .collect::<Vec<String>>()
-                    .join("\n");
+                        })
+                        .collect::<Vec<String>>()
+                        .join("\n");
 
-                api.send_message(&SendMessageParams {
-                    chat_id: ChatId::Integer(msg.chat.id),
-                    text: output_text,
-                    parse_mode: None,
-                    disable_notification: None,
-                    reply_markup: None,
-                    entities: None,
-                    link_preview_options: None,
-                    message_thread_id: None,
-                    protect_content: None,
-                    reply_parameters: None,
-                })?;
+                    api.send_message(&SendMessageParams {
+                        chat_id: ChatId::Integer(msg.chat.id),
+                        text: output_text,
+                        parse_mode: None,
+                        disable_notification: None,
+                        reply_markup: None,
+                        entities: None,
+                        link_preview_options: None,
+                        message_thread_id: None,
+                        protect_content: None,
+                        reply_parameters: None,
+                    })?;
+                }
                 // don't save bot commands to chat history
                 return Ok(None);
             }
@@ -117,9 +133,9 @@ fn handle_message(
                 let hash: Vec<u8> = hasher.finalize().to_vec();
 
                 *last_checkpoint = msg.date;
-                return Ok(Some((*last_checkpoint, hash)));
+                Ok(Some((*last_checkpoint, hash)))
             } else {
-                return Ok(None);
+                Ok(None)
             }
         }
     }
