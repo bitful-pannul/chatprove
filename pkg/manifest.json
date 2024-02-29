@@ -6,10 +6,12 @@
         "request_networking": false,
         "request_capabilities": [
             "http_client:distro:sys",
+            "http_server:distro:sys",
             "vfs:distro:sys"
         ],
         "grant_capabilities": [
             "http_client:distro:sys",
+            "http_server:distro:sys",
             "terminal:terminal:sys",
             "vfs:distro:sys"
         ],

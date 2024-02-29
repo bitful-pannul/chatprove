@@ -1,7 +1,9 @@
 use frankenstein::TelegramApi;
 use frankenstein::UpdateContent::Message as TgMessage;
 use frankenstein::{ChatId, SendMessageParams};
-use kinode_process_lib::{await_message, call_init, println, Address, Message};
+use kinode_process_lib::{
+    await_message, call_init, http::bind_http_static_path, println, Address, Message,
+};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use sha2::Sha256;
@@ -34,10 +36,12 @@ type ProofResult = Vec<(u64, String, String)>;
 type Checkpoints = HashMap<u64, (Vec<u8>, Vec<ChatMessage>)>;
 
 fn handle_message(
+    our: &Address,
     api: &Api,
     history: &mut Vec<ChatMessage>,
     last_checkpoint: &mut u64,
     checkpoints: &Checkpoints,
+    url: &str,
 ) -> anyhow::Result<Option<(u64, Vec<u8>)>> {
     match await_message()? {
         Message::Response { .. } => Ok(None),
@@ -111,6 +115,29 @@ fn handle_message(
                         protect_content: None,
                         reply_parameters: None,
                     })?;
+                    let proof_id: u32 = rand::random();
+                    let proof_json = serde_json::to_vec(&res)?;
+                    bind_http_static_path(
+                        format!("/{proof_id}"),
+                        false,
+                        false,
+                        Some("application/json".into()),
+                        proof_json,
+                    )?;
+
+                    let proof_link = format!("{}/{}/{}", url, our.process, proof_id);
+                    api.send_message(&SendMessageParams {
+                        chat_id: ChatId::Integer(msg.chat.id),
+                        text: proof_link,
+                        parse_mode: None,
+                        disable_notification: None,
+                        reply_markup: None,
+                        entities: None,
+                        link_preview_options: None,
+                        message_thread_id: None,
+                        protect_content: None,
+                        reply_parameters: None,
+                    })?;
                 }
                 // don't save bot commands to chat history
                 return Ok(None);
@@ -146,9 +173,13 @@ fn init(our: Address) {
     println!("chatproof: begin");
 
     // first message must initialize our bot-worker
-    let message = await_message().unwrap();
+    let message: Message = await_message().unwrap();
     let token_str = String::from_utf8(message.body().to_vec()).unwrap();
     let (api, _worker) = init_tg_bot(our.clone(), &token_str, None).unwrap();
+
+    println!("chatproof: give me a url base so I can share proofs too!");
+    let message: Message = await_message().unwrap();
+    let url = String::from_utf8(message.body().to_vec()).unwrap();
 
     let mut history: Vec<ChatMessage> = Vec::new();
 
@@ -161,7 +192,14 @@ fn init(our: Address) {
     let mut checkpoints: Checkpoints = HashMap::new();
 
     loop {
-        match handle_message(&api, &mut history, &mut last_checkpoint, &checkpoints) {
+        match handle_message(
+            &our,
+            &api,
+            &mut history,
+            &mut last_checkpoint,
+            &checkpoints,
+            &url,
+        ) {
             Ok(Some((timestamp, hash))) => {
                 checkpoints.insert(timestamp, (hash, history));
                 history = Vec::new();
