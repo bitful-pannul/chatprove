@@ -1,6 +1,6 @@
 use frankenstein::TelegramApi;
 use frankenstein::UpdateContent::Message as TgMessage;
-use frankenstein::{ChatId, SendMessageParams};
+use frankenstein::{ChatId, ParseMode, SendMessageParams};
 use kinode_process_lib::{
     await_message, call_init, http::bind_http_static_path, println, Address, Message,
 };
@@ -62,8 +62,16 @@ fn handle_message(
             if msg_text.starts_with("/prove ") {
                 let search_string = msg.text.as_ref().map(|s| s[7..].to_string()).unwrap();
 
+                let filtered_checkpoints: Checkpoints = checkpoints
+                    .iter()
+                    .filter(|&(_, (_, messages))| {
+                        messages.iter().any(|m| m.text.contains(&search_string))
+                    })
+                    .map(|(&k, v)| (k, v.clone()))
+                    .collect();
+
                 let mut stdin = SP1Stdin::new();
-                stdin.write(checkpoints);
+                stdin.write(&filtered_checkpoints);
                 stdin.write(&search_string);
                 println!("chatproof: searching chat for string \"{}\"", search_string);
                 let mut res = SP1Prover::prove(CHAT_ELF, stdin).map_err(|e| anyhow::anyhow!(e))?;
@@ -124,12 +132,12 @@ fn handle_message(
                         Some("application/json".into()),
                         proof_json,
                     )?;
-
-                    let proof_link = format!("{}/{}/{}", url, our.process, proof_id);
+                    let link = format!("{}/{}/{}", url, our.process, proof_id);
+                    let proof_link = format!("<a href=\"{}\">{}</a>", link, link);
                     api.send_message(&SendMessageParams {
                         chat_id: ChatId::Integer(msg.chat.id),
                         text: proof_link,
-                        parse_mode: None,
+                        parse_mode: Some(ParseMode::Html),
                         disable_notification: None,
                         reply_markup: None,
                         entities: None,
